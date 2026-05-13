@@ -1,0 +1,48 @@
+name: Frontend Job Alert 🇵🇹
+
+on:
+  schedule:
+    # 07:00 UTC = 08:00 WEST (UTC+1, Portugal summer Apr–Oct)
+    # 08:00 UTC = 08:00 WET  (UTC+0, Portugal winter Oct–Mar)
+    # Running at 07:00 UTC covers both — always lands at or before 8 AM Lisbon.
+    - cron: "0 7 * * 1-5"   # weekdays only
+  workflow_dispatch:          # manual trigger from GitHub Actions UI
+
+permissions:
+  contents: write             # needed to commit seen_jobs.json back to repo
+
+jobs:
+  job-alert:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Use a PAT so the commit-back step can push
+          token: ${{ secrets.GH_PAT }}
+
+      # ── 2. Python setup ──────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # No pip installs — script uses Python stdlib only
+
+      # ── 3. Run alert script ──────────────────────────────────────────────────
+      - name: Run job alert
+        env:
+          TG_TOKEN:      ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID:    ${{ secrets.TG_CHAT_ID }}
+          FINDWORK_KEY:  ${{ secrets.FINDWORK_KEY }}   # optional
+        run: python job_alert.py
+
+      # ── 4. Commit seen_jobs.json so next run knows what was already sent ─────
+      - name: Save seen jobs cache
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen_jobs.json || true
+          git diff --cached --quiet || git commit -m "chore: update seen_jobs cache [skip ci]"
+          git push
