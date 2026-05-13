@@ -33,13 +33,11 @@ SEEN_FILE  = Path("seen_jobs.json")
 # ── Keyword lists ──────────────────────────────────────────────────────────────
 FRONTEND_KW = [
     "frontend", "front-end", "front end", "ui engineer", "ui developer",
-    "web engineer", "web developer", "react", "vue", "angular", "svelte",
-    "nextjs", "next.js", "nuxt", "typescript", "javascript", "ember",
-    "solidjs", "remix", "astro", "qwik",
+    "web engineer", "web developer", "react", "vue",
+    "nextjs", "next.js", "nuxt", "typescript", "javascript",
 ]
 SENIORITY_KW = [
-    "senior", "sr.", "sr ", "lead", "principal", "staff",
-    "mid-level", "mid level", "midlevel", "intermediate", " iii", " ii",
+    "senior", "sr.", "sr ","mid-level", "mid level", "midlevel", "intermediate", " ii",
 ]
 EXCLUDE_KW = [
     "intern", "internship", "junior", "jr.", "jr ",
@@ -420,89 +418,98 @@ def collect_all():
     return unique
 
 # ── Telegram sender ────────────────────────────────────────────────────────────
+# Uses HTML parse_mode — far more forgiving than MarkdownV2.
+# Jobs are grouped into digest messages (~10 per message) to avoid
+# spamming your chat and hitting Telegram's rate limits.
 
-def tg_escape(text):
-    """Escape special chars for Telegram MarkdownV2."""
-    for ch in r"\_*[]()~`>#+-=|{}.!":
-        text = text.replace(ch, f"\\{ch}")
-    return text
+BATCH_SIZE = 10   # jobs per Telegram message
 
-def send_telegram(text):
-    """Send a single Telegram message (MarkdownV2, up to 4096 chars)."""
+def he(text):
+    """Escape text for Telegram HTML mode."""
+    return (str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+def send_telegram(html_text):
+    """Send one Telegram message in HTML mode. Raises on hard failure."""
     url     = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = json.dumps({
-        "chat_id":    TG_CHAT_ID,
-        "text":       text,
-        "parse_mode": "MarkdownV2",
+        "chat_id":                  TG_CHAT_ID,
+        "text":                     html_text,
+        "parse_mode":               "HTML",
         "disable_web_page_preview": True,
     }).encode()
     req = urllib.request.Request(
-        url,
-        data=payload,
+        url, data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=15) as r:
-        resp = json.loads(r.read())
-    if not resp.get("ok"):
-        print(f"  [WARN] Telegram error: {resp}")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = json.loads(r.read())
+        if not resp.get("ok"):
+            print(f"  [WARN] Telegram API error: {resp.get('description')}")
+    except Exception as e:
+        print(f"  [WARN] Telegram send failed: {e}")
+
+def build_card(j):
+    """Build one job card as an HTML snippet (no outer container)."""
+    work_type = get_work_type(
+        f"{j.get('location','')} {j.get('desc_snippet','')}"
+    )
+    title   = he(j.get("title","No title"))
+    company = he(j.get("company") or "—")
+    source  = he(j.get("source",""))
+    loc     = he(j.get("location","Remote"))
+    wt      = he(work_type)
+    url     = j.get("url","#")
+
+    tags = (j.get("tags") or [])[:4]
+    tags_str = "  ".join(f"<code>{he(t)}</code>" for t in tags)
+
+    card = (
+        f'<b><a href="{url}">{title}</a></b>\n'
+        f"🏢 {company}  ·  📡 {source}\n"
+        f"📍 {loc}  ·  {wt}"
+    )
+    if tags_str:
+        card += f"\n{tags_str}"
+    return card
 
 def send_summary(jobs):
-    """
-    Send one summary header + individual job cards.
-    Batches cards to avoid hitting Telegram rate limits (30 msg/sec).
-    """
+    """Send a header, then jobs in batched digest messages."""
     import time
 
-    now     = datetime.now(timezone.utc).strftime("%d %b %Y · %H:%M UTC")
-    counts  = Counter(j["source"] for j in jobs)
-    top_src = ", ".join(f"{s} \\({c}\\)" for s, c in counts.most_common(5))
+    now    = datetime.now(timezone.utc).strftime("%d %b %Y · %H:%M UTC")
+    counts = Counter(j["source"] for j in jobs)
+    top_src = " · ".join(
+        f"{he(s)} ({c})" for s, c in counts.most_common(5)
+    )
 
-    # ── Summary header ──────────────────────────────────────────────────────────
+    # ── Header ──────────────────────────────────────────────────────────────
     header = (
-        f"⚡ *{tg_escape(str(len(jobs)))} new Frontend jobs* — {tg_escape(now)}\n"
-        f"🎯 Mid/Senior · Remote \\+ Relocation\n\n"
-        f"*Top sources:* {top_src}\n"
-        f"{'─' * 28}"
+        f"⚡ <b>{len(jobs)} new Frontend jobs</b> — {he(now)}\n"
+        f"🎯 Mid/Senior · Remote + Relocation\n\n"
+        f"<b>Top sources:</b> {top_src}"
     )
     send_telegram(header)
     time.sleep(0.5)
 
-    # ── Individual job cards ────────────────────────────────────────────────────
-    for i, j in enumerate(jobs):
-        work_type = get_work_type(
-            f"{j.get('location','')} {j.get('desc_snippet','')}"
-        )
-        tags_str  = " ".join(f"`{t}`" for t in (j.get("tags") or [])[:4])
-        company   = tg_escape(j.get("company") or "—")
-        title     = tg_escape(j.get("title","No title"))
-        source    = tg_escape(j.get("source",""))
-        location  = tg_escape(j.get("location","Remote"))
-        url       = j.get("url","")
+    # ── Batched job digests (BATCH_SIZE jobs per message) ───────────────────
+    for batch_start in range(0, len(jobs), BATCH_SIZE):
+        batch = jobs[batch_start: batch_start + BATCH_SIZE]
+        end   = min(batch_start + BATCH_SIZE, len(jobs))
+        msg   = f"<b>Jobs {batch_start + 1}–{end} of {len(jobs)}</b>\n{'─' * 24}\n\n"
+        msg  += "\n\n".join(build_card(j) for j in batch)
+        send_telegram(msg)
+        time.sleep(1)   # stay well under Telegram's 30 msg/sec limit
 
-        card = (
-            f"*{title}*\n"
-            f"🏢 {company}  •  📡 {source}\n"
-            f"📍 {location}  •  {tg_escape(work_type)}\n"
-        )
-        if tags_str:
-            card += f"{tags_str}\n"
-        card += f"[Apply →]({url})"
-
-        send_telegram(card)
-
-        # Telegram allows ~30 messages/sec; be polite
-        if (i + 1) % 20 == 0:
-            time.sleep(1)
-        else:
-            time.sleep(0.15)
-
-    # ── Footer ──────────────────────────────────────────────────────────────────
-    footer = (
-        "✅ *That's all for today\\!*\n"
+    # ── Footer ───────────────────────────────────────────────────────────────
+    send_telegram(
+        "✅ <b>That's all for today!</b>\n"
         "Next update tomorrow at 8:00 AM Lisbon time 🇵🇹"
     )
-    send_telegram(footer)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
