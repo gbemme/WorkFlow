@@ -33,13 +33,12 @@ SEEN_FILE  = Path("seen_jobs.json")
 # ── Keyword lists ──────────────────────────────────────────────────────────────
 FRONTEND_KW = [
     "frontend", "front-end", "front end", "ui engineer", "ui developer",
-    "web engineer", "web developer", "react", "vue", "angular", "svelte",
-    "nextjs", "next.js", "nuxt", "typescript", "javascript", "ember",
-    "solidjs", "remix", "astro", "qwik",
+    "web engineer", "web developer", "react", "vue", 
+    "nextjs", "next.js", "nuxt", "typescript", "javascript",
 ]
 SENIORITY_KW = [
-    "senior", "sr.", "sr ", "lead", "principal", "staff",
-    "mid-level", "mid level", "midlevel", "intermediate", " iii", " ii",
+    "senior", "sr.", "sr ",
+    "mid-level", "mid level", "midlevel", "intermediate", " ii",
 ]
 EXCLUDE_KW = [
     "intern", "internship", "junior", "jr.", "jr ",
@@ -108,6 +107,32 @@ def fetch_url(url, headers=None, timeout=15):
 def fetch_json(url, headers=None):
     return json.loads(fetch_url(url, headers))
 
+def parse_date(text):
+    """
+    Parse a date string into a UTC timestamp (float).
+    Returns 0.0 if parsing fails so jobs without dates sort last.
+    """
+    if not text:
+        return 0.0
+    text = text.strip()
+    for fmt in (
+        "%a, %d %b %Y %H:%M:%S %z",   # RSS standard: Mon, 13 May 2026 08:00:00 +0000
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%Y-%m-%dT%H:%M:%S%z",         # ISO 8601
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            from datetime import datetime as _dt
+            dt = _dt.strptime(text, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
 def fetch_rss(url, source):
     try:
         raw  = fetch_url(url)
@@ -122,11 +147,15 @@ def fetch_rss(url, source):
                      item.findtext("atom:link", namespaces=ns) or "").strip()
             desc  = (item.findtext("description") or
                      item.findtext("atom:summary", namespaces=ns) or "").strip()
+            pub   = (item.findtext("pubDate") or
+                     item.findtext("published") or
+                     item.findtext("atom:published", namespaces=ns) or "").strip()
             combined = f"{title} {desc} remote"
             if is_frontend(combined) and is_mid_senior(combined):
                 jobs.append({"title": title, "company": "", "url": link,
                              "tags": [], "source": source,
-                             "location": "Remote", "desc_snippet": desc[:200]})
+                             "location": "Remote", "desc_snippet": desc[:200],
+                             "posted_at": parse_date(pub)})
         return jobs
     except Exception as e:
         print(f"  [WARN] {source} RSS: {e}")
@@ -151,6 +180,7 @@ def source_remoteok():
                     "tags": (item.get("tags") or [])[:5],
                     "source": "RemoteOK", "location": "Remote",
                     "desc_snippet": desc[:200],
+                    "posted_at": parse_date(item.get("date","")),
                 })
         print(f"  RemoteOK:              {len(jobs)}")
         return jobs
@@ -183,6 +213,7 @@ def source_remotive():
                     "tags": (item.get("tags") or [])[:5],
                     "source": "Remotive", "location": "Remote",
                     "desc_snippet": re.sub(r"<[^>]+>","",desc)[:200],
+                    "posted_at": parse_date(item.get("publication_date","")),
                 })
         print(f"  Remotive:              {len(jobs)}")
         return jobs
@@ -209,6 +240,7 @@ def source_arbeitnow():
                     "tags": (item.get("tags") or [])[:5],
                     "source": "Arbeitnow", "location": loc or "Remote",
                     "desc_snippet": re.sub(r"<[^>]+>","",desc)[:200],
+                    "posted_at": parse_date(item.get("created_at","")),
                 })
         print(f"  Arbeitnow:             {len(jobs)}")
         return jobs
@@ -229,6 +261,7 @@ def source_jobicy():
                     "url": item.get("url",""), "tags": [],
                     "source": "Jobicy", "location": "Remote",
                     "desc_snippet": re.sub(r"<[^>]+>","",desc)[:200],
+                    "posted_at": parse_date(item.get("pubDate","")),
                 })
         print(f"  Jobicy:                {len(jobs)}")
         return jobs
@@ -257,6 +290,7 @@ def source_findwork():
                     "tags": (item.get("keywords") or [])[:5],
                     "source": "FindWork", "location": "Remote",
                     "desc_snippet": "",
+                    "posted_at": parse_date(item.get("date_posted","")),
                 })
         print(f"  FindWork:              {len(jobs)}")
         return jobs
@@ -306,6 +340,7 @@ def source_hn_whoishiring():
                     "tags": ["startup","direct"],
                     "source": "HN Who's Hiring", "location": "Remote/Various",
                     "desc_snippet": snippet[:200],
+                    "posted_at": float(comment.get("time") or 0),
                 })
             except:
                 continue
@@ -341,6 +376,7 @@ def source_greenhouse_startups():
                         "source": f"Greenhouse/{slug}",
                         "location": loc or "Remote",
                         "desc_snippet": re.sub(r"<[^>]+>","",desc)[:200],
+                        "posted_at": parse_date(item.get("updated_at","")),
                     })
         except:
             pass
@@ -371,6 +407,7 @@ def source_lever_startups():
                         "source": f"Lever/{slug}",
                         "location": loc or "Remote",
                         "desc_snippet": desc,
+                        "posted_at": (item.get("createdAt") or 0) / 1000,  # Lever uses ms
                     })
         except:
             pass
@@ -393,6 +430,8 @@ def source_rss_extra():
         jobs += j
     return jobs
 
+DAILY_LIMIT = 10   # max jobs sent per day, most recent first
+
 # ── Collect all ────────────────────────────────────────────────────────────────
 
 def collect_all():
@@ -409,51 +448,49 @@ def collect_all():
         except Exception as e:
             print(f"  [ERROR] {fn.__name__}: {e}")
 
+    # Deduplicate
     seen_keys, unique = set(), []
     for j in all_jobs:
         k = job_id(j)
         if k not in seen_keys:
             seen_keys.add(k)
+            # Ensure every job has a posted_at field (default 0 = unknown)
+            j.setdefault("posted_at", 0.0)
             unique.append(j)
+
+    # Sort newest first — jobs with no date (0.0) fall to the bottom
+    unique.sort(key=lambda j: j["posted_at"], reverse=True)
 
     print(f"\n  ✅ Total unique this run: {len(unique)}")
     return unique
 
 # ── Telegram sender ────────────────────────────────────────────────────────────
-# Uses HTML parse_mode — far more forgiving than MarkdownV2.
-# Jobs are grouped into digest messages (~10 per message) to avoid
-# spamming your chat and hitting Telegram's rate limits.
+# Uses NO parse_mode (plain text only) + inline keyboard button for the URL.
+# This is the most robust approach — zero formatting, zero URL escaping issues.
+# Each job is one message with an [Apply →] inline button.
 
-BATCH_SIZE = 10   # jobs per Telegram message
-
-def he(text):
-    """Escape text for Telegram HTML mode."""
-    return (str(text)
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;"))
-
-TG_MAX_LEN  = 4000   # Telegram hard limit is 4096; leave headroom for safety
-
-def send_telegram(html_text):
+def send_plain(text, url=None):
     """
-    Send one Telegram message in HTML mode.
-    Hard-truncates to TG_MAX_LEN chars to avoid HTTP 400 errors.
-    Never raises — logs warnings instead so the run keeps going.
+    Send a plain-text Telegram message.
+    If `url` is given, attaches an inline [Apply →] button.
+    Never raises — silently logs on failure.
     """
-    # Safety truncation: cut at last newline before the limit
-    if len(html_text) > TG_MAX_LEN:
-        html_text = html_text[:TG_MAX_LEN].rsplit("\n", 1)[0] + "\n<i>…truncated</i>"
+    text = text[:4000]   # hard safety cap
+    payload = {
+        "chat_id": TG_CHAT_ID,
+        "text":    text,
+        # No parse_mode — pure plain text, nothing can break
+    }
+    if url:
+        # Inline keyboard with one button linking to the job
+        payload["reply_markup"] = {
+            "inline_keyboard": [[{"text": "Apply →", "url": url}]]
+        }
 
-    url     = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = json.dumps({
-        "chat_id":                  TG_CHAT_ID,
-        "text":                     html_text,
-        "parse_mode":               "HTML",
-        "disable_web_page_preview": True,
-    }).encode()
-    req = urllib.request.Request(
-        url, data=payload,
+    api_url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    data    = json.dumps(payload).encode()
+    req     = urllib.request.Request(
+        api_url, data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -461,96 +498,76 @@ def send_telegram(html_text):
         with urllib.request.urlopen(req, timeout=15) as r:
             resp = json.loads(r.read())
         if not resp.get("ok"):
-            # Log the full Telegram error description for easier debugging
-            print(f"  [WARN] Telegram API error: {resp.get('description')} | text[:80]={html_text[:80]!r}")
+            print(f"  [WARN] Telegram: {resp.get('description')} | {text[:60]!r}")
+            return False
+        return True
     except Exception as e:
-        print(f"  [WARN] Telegram send failed: {e} | text[:80]={html_text[:80]!r}")
+        print(f"  [WARN] Telegram send failed: {e} | {text[:60]!r}")
+        return False
 
-def build_card(j):
-    """Build one job card as a compact HTML snippet."""
+def build_card_text(j, index, total):
+    """Build a plain-text job card (no HTML, no markdown)."""
     work_type = get_work_type(
         f"{j.get('location','')} {j.get('desc_snippet','')}"
     )
-    # Truncate long scraped titles (HN comments can be very long)
-    raw_title = (j.get("title") or "No title")[:120]
-    title   = he(raw_title)
-    company = he((j.get("company") or "—")[:80])
-    source  = he(j.get("source","")[:40])
-    loc     = he((j.get("location") or "Remote")[:60])
-    wt      = he(work_type)
-    url     = j.get("url","#")
+    title   = (j.get("title")   or "No title")[:120].strip()
+    company = (j.get("company") or "—")[:80].strip()
+    source  = (j.get("source")  or "")[:40].strip()
+    loc     = (j.get("location") or "Remote")[:60].strip()
+    tags    = [str(t)[:20] for t in (j.get("tags") or [])[:4]]
 
-    tags = (j.get("tags") or [])[:3]   # max 3 tags to keep cards short
-    tags_str = "  ".join(f"<code>{he(str(t)[:20])}</code>" for t in tags)
+    # Format posted date if available
+    ts = j.get("posted_at") or 0.0
+    if ts > 0:
+        from datetime import datetime as _dt
+        posted = _dt.fromtimestamp(ts, tz=timezone.utc).strftime("%d %b %Y")
+    else:
+        posted = "Unknown"
 
-    card = (
-        f'<b><a href="{url}">{title}</a></b>\n'
-        f"🏢 {company}  ·  📡 {source}\n"
-        f"📍 {loc}  ·  {wt}"
-    )
-    if tags_str:
-        card += f"\n{tags_str}"
-    return card
+    lines = [
+        f"[{index}/{total}] {title}",
+        f"Company : {company}",
+        f"Source  : {source}",
+        f"Location: {loc}",
+        f"Type    : {work_type}",
+        f"Posted  : {posted}",
+    ]
+    if tags:
+        lines.append(f"Tags    : {' · '.join(tags)}")
+    return "\n".join(lines)
 
 def send_summary(jobs):
-    """
-    Send a header + jobs packed into messages that each stay under TG_MAX_LEN.
-    Cards are added one-by-one until the message would exceed the limit,
-    then flushed — so batch size adapts to actual card length automatically.
-    """
+    """Send header + one message per job + footer."""
     import time
 
     now    = datetime.now(timezone.utc).strftime("%d %b %Y · %H:%M UTC")
     counts = Counter(j["source"] for j in jobs)
-    top_src = " · ".join(f"{he(s)} ({c})" for s, c in counts.most_common(5))
+    top_src = " | ".join(f"{s} ({c})" for s, c in counts.most_common(5))
 
     # ── Header ──────────────────────────────────────────────────────────────
     header = (
-        f"⚡ <b>{len(jobs)} new Frontend jobs</b> — {he(now)}\n"
-        f"🎯 Mid/Senior · Remote + Relocation\n\n"
-        f"<b>Top sources:</b> {top_src}"
+        f"⚡ {len(jobs)} new Frontend jobs — {now}\n"
+        f"Mid/Senior · Remote + Relocation\n\n"
+        f"Top sources:\n{top_src}"
     )
-    send_telegram(header)
-    time.sleep(0.5)
+    send_plain(header)
+    time.sleep(1)
 
-    # ── Pack cards into messages dynamically ─────────────────────────────────
-    # Each message gets a "#X–Y of N" header then as many cards as fit.
-    SEP       = "\n\n"
-    sent      = 0
-    buf_cards = []   # cards accumulated so far in current message
-
-    def flush(buf, label):
-        if not buf:
-            return
-        msg = f"{label}\n\n" + SEP.join(buf)
-        send_telegram(msg)
-        time.sleep(1)
-
-    for j in jobs:
-        card = build_card(j)
-        # Estimate message length if we add this card
-        tentative = buf_cards + [card]
-        label_len = 30   # rough length of the "Jobs X–Y of N" header line
-        total_len = label_len + sum(len(c) + len(SEP) for c in tentative)
-
-        if total_len > TG_MAX_LEN and buf_cards:
-            # Flush current buffer before adding new card
-            end_idx = sent + len(buf_cards)
-            flush(buf_cards, f"<b>Jobs {sent + 1}–{end_idx} of {len(jobs)}</b>")
-            sent += len(buf_cards)
-            buf_cards = [card]
-        else:
-            buf_cards.append(card)
-
-    # Flush remaining cards
-    if buf_cards:
-        end_idx = sent + len(buf_cards)
-        flush(buf_cards, f"<b>Jobs {sent + 1}–{end_idx} of {len(jobs)}</b>")
+    # ── One message per job with inline Apply button ─────────────────────────
+    ok_count = 0
+    for i, j in enumerate(jobs, 1):
+        text = build_card_text(j, i, len(jobs))
+        url  = (j.get("url") or "").strip() or None
+        if send_plain(text, url=url):
+            ok_count += 1
+        # Respect Telegram rate limit: max ~30 msg/sec, stay at ~3/sec to be safe
+        time.sleep(0.35)
 
     # ── Footer ───────────────────────────────────────────────────────────────
-    send_telegram(
-        "✅ <b>All done!</b>\n"
-        "Next update tomorrow at 8:00 AM Lisbon time 🇵🇹"
+    time.sleep(0.5)
+    send_plain(
+        f"✅ Done! {ok_count}/{len(jobs)} jobs sent today.\n"
+        f"Showing top {len(jobs)} most recent · Next update tomorrow at 8:00 AM Lisbon time 🇵🇹"
     )
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -558,6 +575,8 @@ def send_summary(jobs):
 def main():
     seen     = load_seen()
     all_jobs = collect_all()
+
+    # Filter to unseen only — already sorted newest-first by collect_all()
     new_jobs = [j for j in all_jobs if job_id(j) not in seen]
     print(f"\n  🆕 New (unseen) jobs: {len(new_jobs)}")
 
@@ -565,14 +584,20 @@ def main():
         print("  Nothing new — no notification sent.")
         return
 
-    # Persist before sending to avoid duplicates on retry
-    seen.update(job_id(j) for j in new_jobs)
+    # Cap to daily limit — best (newest) jobs first
+    to_send = new_jobs[:DAILY_LIMIT]
+    skipped = len(new_jobs) - len(to_send)
+    if skipped:
+        print(f"  📋 Capped to {DAILY_LIMIT} (skipping {skipped} older jobs for tomorrow)")
+
+    send_summary(to_send)
+
+    # Save only the IDs we actually sent as seen
+    seen.update(job_id(j) for j in to_send)
     if len(seen) > 5000:
         seen = set(list(seen)[-5000:])
     save_seen(seen)
-
-    send_summary(new_jobs)
-    print(f"  📲 Sent {len(new_jobs)} job cards to Telegram.")
+    print(f"  📲 Sent {len(to_send)} job cards to Telegram.")
 
 if __name__ == "__main__":
     main()
