@@ -19,9 +19,6 @@ jobs:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          # Use a PAT so the commit-back step can push
-          token: ${{ secrets.GH_PAT }}
 
       # ── 2. Python setup ──────────────────────────────────────────────────────
       - name: Set up Python 3.11
@@ -40,9 +37,13 @@ jobs:
 
       # ── 4. Commit seen_jobs.json so next run knows what was already sent ─────
       - name: Save seen jobs cache
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Embed PAT in remote URL so push is authenticated
+          git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}"
           git add seen_jobs.json || true
           git diff --cached --quiet || git commit -m "chore: update seen_jobs cache [skip ci]"
           git push

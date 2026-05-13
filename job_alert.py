@@ -33,11 +33,13 @@ SEEN_FILE  = Path("seen_jobs.json")
 # ── Keyword lists ──────────────────────────────────────────────────────────────
 FRONTEND_KW = [
     "frontend", "front-end", "front end", "ui engineer", "ui developer",
-    "web engineer", "web developer", "react", "vue",
-    "nextjs", "next.js", "nuxt", "typescript", "javascript",
+    "web engineer", "web developer", "react", "vue", "angular", "svelte",
+    "nextjs", "next.js", "nuxt", "typescript", "javascript", "ember",
+    "solidjs", "remix", "astro", "qwik",
 ]
 SENIORITY_KW = [
-    "senior", "sr.", "sr ","mid-level", "mid level", "midlevel", "intermediate", " ii",
+    "senior", "sr.", "sr ", "lead", "principal", "staff",
+    "mid-level", "mid level", "midlevel", "intermediate", " iii", " ii",
 ]
 EXCLUDE_KW = [
     "intern", "internship", "junior", "jr.", "jr ",
@@ -431,8 +433,18 @@ def he(text):
             .replace("<", "&lt;")
             .replace(">", "&gt;"))
 
+TG_MAX_LEN  = 4000   # Telegram hard limit is 4096; leave headroom for safety
+
 def send_telegram(html_text):
-    """Send one Telegram message in HTML mode. Raises on hard failure."""
+    """
+    Send one Telegram message in HTML mode.
+    Hard-truncates to TG_MAX_LEN chars to avoid HTTP 400 errors.
+    Never raises — logs warnings instead so the run keeps going.
+    """
+    # Safety truncation: cut at last newline before the limit
+    if len(html_text) > TG_MAX_LEN:
+        html_text = html_text[:TG_MAX_LEN].rsplit("\n", 1)[0] + "\n<i>…truncated</i>"
+
     url     = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = json.dumps({
         "chat_id":                  TG_CHAT_ID,
@@ -449,24 +461,27 @@ def send_telegram(html_text):
         with urllib.request.urlopen(req, timeout=15) as r:
             resp = json.loads(r.read())
         if not resp.get("ok"):
-            print(f"  [WARN] Telegram API error: {resp.get('description')}")
+            # Log the full Telegram error description for easier debugging
+            print(f"  [WARN] Telegram API error: {resp.get('description')} | text[:80]={html_text[:80]!r}")
     except Exception as e:
-        print(f"  [WARN] Telegram send failed: {e}")
+        print(f"  [WARN] Telegram send failed: {e} | text[:80]={html_text[:80]!r}")
 
 def build_card(j):
-    """Build one job card as an HTML snippet (no outer container)."""
+    """Build one job card as a compact HTML snippet."""
     work_type = get_work_type(
         f"{j.get('location','')} {j.get('desc_snippet','')}"
     )
-    title   = he(j.get("title","No title"))
-    company = he(j.get("company") or "—")
-    source  = he(j.get("source",""))
-    loc     = he(j.get("location","Remote"))
+    # Truncate long scraped titles (HN comments can be very long)
+    raw_title = (j.get("title") or "No title")[:120]
+    title   = he(raw_title)
+    company = he((j.get("company") or "—")[:80])
+    source  = he(j.get("source","")[:40])
+    loc     = he((j.get("location") or "Remote")[:60])
     wt      = he(work_type)
     url     = j.get("url","#")
 
-    tags = (j.get("tags") or [])[:4]
-    tags_str = "  ".join(f"<code>{he(t)}</code>" for t in tags)
+    tags = (j.get("tags") or [])[:3]   # max 3 tags to keep cards short
+    tags_str = "  ".join(f"<code>{he(str(t)[:20])}</code>" for t in tags)
 
     card = (
         f'<b><a href="{url}">{title}</a></b>\n'
@@ -478,14 +493,16 @@ def build_card(j):
     return card
 
 def send_summary(jobs):
-    """Send a header, then jobs in batched digest messages."""
+    """
+    Send a header + jobs packed into messages that each stay under TG_MAX_LEN.
+    Cards are added one-by-one until the message would exceed the limit,
+    then flushed — so batch size adapts to actual card length automatically.
+    """
     import time
 
     now    = datetime.now(timezone.utc).strftime("%d %b %Y · %H:%M UTC")
     counts = Counter(j["source"] for j in jobs)
-    top_src = " · ".join(
-        f"{he(s)} ({c})" for s, c in counts.most_common(5)
-    )
+    top_src = " · ".join(f"{he(s)} ({c})" for s, c in counts.most_common(5))
 
     # ── Header ──────────────────────────────────────────────────────────────
     header = (
@@ -496,18 +513,43 @@ def send_summary(jobs):
     send_telegram(header)
     time.sleep(0.5)
 
-    # ── Batched job digests (BATCH_SIZE jobs per message) ───────────────────
-    for batch_start in range(0, len(jobs), BATCH_SIZE):
-        batch = jobs[batch_start: batch_start + BATCH_SIZE]
-        end   = min(batch_start + BATCH_SIZE, len(jobs))
-        msg   = f"<b>Jobs {batch_start + 1}–{end} of {len(jobs)}</b>\n{'─' * 24}\n\n"
-        msg  += "\n\n".join(build_card(j) for j in batch)
+    # ── Pack cards into messages dynamically ─────────────────────────────────
+    # Each message gets a "#X–Y of N" header then as many cards as fit.
+    SEP       = "\n\n"
+    sent      = 0
+    buf_cards = []   # cards accumulated so far in current message
+
+    def flush(buf, label):
+        if not buf:
+            return
+        msg = f"{label}\n\n" + SEP.join(buf)
         send_telegram(msg)
-        time.sleep(1)   # stay well under Telegram's 30 msg/sec limit
+        time.sleep(1)
+
+    for j in jobs:
+        card = build_card(j)
+        # Estimate message length if we add this card
+        tentative = buf_cards + [card]
+        label_len = 30   # rough length of the "Jobs X–Y of N" header line
+        total_len = label_len + sum(len(c) + len(SEP) for c in tentative)
+
+        if total_len > TG_MAX_LEN and buf_cards:
+            # Flush current buffer before adding new card
+            end_idx = sent + len(buf_cards)
+            flush(buf_cards, f"<b>Jobs {sent + 1}–{end_idx} of {len(jobs)}</b>")
+            sent += len(buf_cards)
+            buf_cards = [card]
+        else:
+            buf_cards.append(card)
+
+    # Flush remaining cards
+    if buf_cards:
+        end_idx = sent + len(buf_cards)
+        flush(buf_cards, f"<b>Jobs {sent + 1}–{end_idx} of {len(jobs)}</b>")
 
     # ── Footer ───────────────────────────────────────────────────────────────
     send_telegram(
-        "✅ <b>That's all for today!</b>\n"
+        "✅ <b>All done!</b>\n"
         "Next update tomorrow at 8:00 AM Lisbon time 🇵🇹"
     )
 
