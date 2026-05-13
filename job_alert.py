@@ -481,10 +481,10 @@ def send_plain(text, url=None):
         "text":    text,
         # No parse_mode — pure plain text, nothing can break
     }
-   if url and url.startswith(("http://", "https://")):
-    payload["reply_markup"] = {
-        "inline_keyboard": [[{"text": "Apply →", "url": url}]]
-    }
+    if url and url.startswith(("http://", "https://")):
+        payload["reply_markup"] = {
+            "inline_keyboard": [[{"text": "Apply →", "url": url}]]
+        }
 
     api_url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     data    = json.dumps(payload).encode()
