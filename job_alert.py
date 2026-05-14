@@ -27,7 +27,7 @@ TG_TOKEN   = os.environ["TG_TOKEN"]
 TG_CHAT_ID = os.environ["TG_CHAT_ID"]
 SEEN_FILE  = Path("seen_jobs.json")
 
-DAILY_LIMIT = 10          # max jobs sent per run, newest first
+DAILY_LIMIT = 15          # max jobs sent per run, newest first
 ATS_TIMEOUT = 6           # seconds per ATS board request (many to hit)
 MAX_ATS_BOARDS = 80       # cap how many boards we discover per ATS
 
