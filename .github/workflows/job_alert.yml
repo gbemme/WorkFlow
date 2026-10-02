@@ -2,15 +2,13 @@ name: Frontend Job Alert 🇵🇹
 
 on:
   schedule:
-    # 07:00 UTC
-    # = 08:00 Lisbon during summer (WEST)
-    # = 07:00 Lisbon during winter (WET)
     - cron: "0 7 * * 1-5"
 
   workflow_dispatch:
 
+# 1. Add write permissions so the GITHUB_TOKEN can commit and push updates
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   job-alert:
@@ -18,23 +16,17 @@ jobs:
 
     steps:
 
-      # ─────────────────────────────────────────────
-      # 1. Checkout repository
-      # ─────────────────────────────────────────────
+      # 2. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ─────────────────────────────────────────────
-      # 2. Set up Python
-      # ─────────────────────────────────────────────
+      # 3. Set up Python
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ─────────────────────────────────────────────
-      # 3. Run job alert
-      # ─────────────────────────────────────────────
+      # 4. Run job alert script
       - name: Run job alert
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
