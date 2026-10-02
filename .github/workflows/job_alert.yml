@@ -2,48 +2,88 @@ name: Frontend Job Alert 🇵🇹
 
 on:
   schedule:
-    # 07:00 UTC = 08:00 WEST (UTC+1, Portugal summer Apr–Oct)
-    # 08:00 UTC = 08:00 WET  (UTC+0, Portugal winter Oct–Mar)
-    # Running at 07:00 UTC covers both — always lands at or before 8 AM Lisbon.
-    - cron: "30 4 * * 1-5"   # weekdays only
-  workflow_dispatch:          # manual trigger from GitHub Actions UI
+    # 07:00 UTC
+    # = 08:00 Lisbon during WEST (summer)
+    # = 07:00 Lisbon during WET (winter)
+    #
+    # GitHub Actions cron uses UTC and does not automatically adjust
+    # for Portugal's daylight-saving time.
+    - cron: "0 7 * * 1-5"
 
+  # Allows you to run it manually from:
+  # GitHub → Actions → Frontend Job Alert → Run workflow
+  workflow_dispatch:
+
+# Required so GitHub Actions can commit seen_jobs.json
+# back to the repository.
 permissions:
-  contents: write             # needed to commit seen_jobs.json back to repo
+  contents: write
 
 jobs:
   job-alert:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────────
+
+      # ─────────────────────────────────────────────────────────────
+      # 1. Checkout repository
+      # ─────────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Use the built-in GitHub token for pushing changes.
+          persist-credentials: true
 
-      # ── 2. Python setup ──────────────────────────────────────────────────────
+      # ─────────────────────────────────────────────────────────────
+      # 2. Set up Python
+      # ─────────────────────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      # No pip installs — script uses Python stdlib only
 
-      # ── 3. Run alert script ──────────────────────────────────────────────────
+      # No pip installation required.
+      # job_alert.py uses Python standard library only.
+
+      # ─────────────────────────────────────────────────────────────
+      # 3. Run job alert
+      # ─────────────────────────────────────────────────────────────
       - name: Run job alert
         env:
-          TG_TOKEN:      ${{ secrets.TG_TOKEN }}
-          TG_CHAT_ID:    ${{ secrets.TG_CHAT_ID }}
-          FINDWORK_KEY:  ${{ secrets.FINDWORK_KEY }}   # optional
-        run: python job_alert.py
-
-      # ── 4. Commit seen_jobs.json so next run knows what was already sent ─────
-      - name: Save seen jobs cache
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          FINDWORK_KEY: ${{ secrets.FINDWORK_KEY }}
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Embed PAT in remote URL so push is authenticated
-          git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}"
-          git add seen_jobs.json || true
-          git diff --cached --quiet || git commit -m "chore: update seen_jobs cache [skip ci]"
-          git push
+          python job_alert.py
+
+      # ─────────────────────────────────────────────────────────────
+      # 4. Save seen_jobs.json
+      # ─────────────────────────────────────────────────────────────
+      - name: Save seen jobs cache
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Check whether job_alert.py changed the cache.
+          if git diff --quiet -- seen_jobs.json; then
+            echo "No changes to seen_jobs.json"
+            exit 0
+          fi
+
+          echo "seen_jobs.json changed — committing cache..."
+
+          git add seen_jobs.json
+
+          git commit -m "chore: update seen_jobs cache [skip ci]"
+
+          # Get the latest version of main before pushing.
+          git fetch origin main
+
+          # Rebase our cache commit on top of the latest main.
+          git rebase origin/main
+
+          # Push the rebased commit.
+          git push origin HEAD:main
