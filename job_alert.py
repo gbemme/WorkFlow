@@ -393,7 +393,10 @@ def fetch_url(url: str, *, headers: dict[str, str] | None = None, timeout: int =
 
 
 def fetch_json(url: str, *, headers: dict[str, str] | None = None, timeout: int = REQUEST_TIMEOUT) -> Any:
-    return json.loads(fetch_url(url, headers=headers, timeout=timeout).decode("utf-8-sig"))
+    content = fetch_url(url, headers=headers, timeout=timeout).decode("utf-8-sig")
+    if not content.strip():
+        return {}
+    return json.loads(content)
 
 
 def post_form(url: str, data: dict[str, str], *, headers: dict[str, str] | None = None, timeout: int = REQUEST_TIMEOUT) -> Any:
@@ -463,7 +466,7 @@ def job_id(job: dict) -> str:
         normalize_text(job.get("company")),
         normalize_text(job.get("location")),
     ])
-    return hashlib.sha256(key.encode()).hexdigest()[:16]
+    return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
 def load_seen() -> set[str]:
@@ -686,7 +689,10 @@ def make_job(
 def fetch_rss(url: str, source: str) -> list[dict]:
     jobs = []
     try:
-        root = ET.fromstring(fetch_url(url))
+        content = fetch_url(url)
+        if not content:
+            return []
+        root = ET.fromstring(content)
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         items = root.findall(".//item") or root.findall(".//atom:entry", ns)
         for item in items[:MAX_PER_SOURCE]:
@@ -728,13 +734,18 @@ def source_rss() -> list[dict]:
 def source_remoteok() -> list[dict]:
     try:
         data = fetch_json("https://remoteok.com/api")
-        records = data[1:] if isinstance(data, list) else []
+        if not isinstance(data, list):
+             print(f"  RemoteOK: unexpected API format (expected list, got {type(data).__name__})")
+             return []
+        records = data[1:]
         jobs = []
         raw = target = 0
         reasons: Counter[str] = Counter()
         target_preview = []
 
         for item in records[:MAX_PER_SOURCE]:
+            if not isinstance(item, dict):
+                 continue
             raw += 1
             job = make_job(
                 item.get("position", ""), item.get("company", ""), item.get("url", ""), "RemoteOK",
@@ -774,6 +785,8 @@ def source_remotive() -> list[dict]:
         try:
             url = "https://remotive.com/api/remote-jobs?" + urllib.parse.urlencode({"category": category, "limit": MAX_PER_SOURCE})
             data = fetch_json(url)
+            if not isinstance(data, dict):
+                 continue
             for item in data.get("jobs", []):
                 job = make_job(
                     item.get("title", ""), item.get("company_name", ""), item.get("url", ""), source_name,
@@ -793,6 +806,8 @@ def source_jobicy() -> list[dict]:
     try:
         url = "https://jobicy.com/api/v2/remote-jobs?" + urllib.parse.urlencode({"count": MAX_PER_SOURCE})
         data = fetch_json(url)
+        if not isinstance(data, dict):
+             return []
         jobs = []
         for item in data.get("jobs", [])[:MAX_PER_SOURCE]:
             job = make_job(
@@ -813,6 +828,8 @@ def source_jobicy() -> list[dict]:
 def source_arbeitnow() -> list[dict]:
     try:
         data = fetch_json("https://www.arbeitnow.com/api/job-board-api")
+        if not isinstance(data, dict):
+             return []
         jobs = []
         for item in data.get("data", [])[:MAX_PER_SOURCE]:
             job = make_job(
@@ -840,6 +857,8 @@ def source_findwork() -> list[dict]:
     try:
         url = "https://findwork.dev/api/jobs/?" + urllib.parse.urlencode({"remote": "true"})
         data = fetch_json(url, headers={"Authorization": f"Token {FINDWORK_KEY}"})
+        if not isinstance(data, dict):
+             return []
         for item in data.get("results", []):
             job = make_job(
                 item.get("role", ""), item.get("company_name", ""), item.get("url", ""), "FindWork",
@@ -866,16 +885,22 @@ def source_hn_hiring() -> list[dict]:
             "query": "Ask HN Who is Hiring", "tags": "ask_hn", "hitsPerPage": 10,
         })
         search = fetch_json(search_url)
+        if not isinstance(search, dict):
+             return []
         hits = [h for h in search.get("hits", []) if "who is hiring" in normalize_text(h.get("title", ""))]
         if not hits:
             print("  HN Who's Hiring: 0")
             return []
         story_id = hits[0].get("objectID")
         story = fetch_json(f"https://hacker-news.firebaseio.com/v0/item/{story_id}.json")
+        if not isinstance(story, dict):
+             return []
         jobs = []
         for kid in (story.get("kids") or [])[:250]:
             try:
                 comment = fetch_json(f"https://hacker-news.firebaseio.com/v0/item/{kid}.json", timeout=6)
+                if not isinstance(comment, dict):
+                     continue
                 text = clean_text(comment.get("text", ""))
                 if not text or comment.get("dead") or comment.get("deleted"):
                     continue
@@ -904,6 +929,8 @@ def source_hn_hiring() -> list[dict]:
 def _greenhouse_slugs() -> list[str]:
     try:
         data = fetch_json("https://boards-api.greenhouse.io/v1/boards", timeout=10)
+        if not isinstance(data, dict):
+             return ["linear", "vercel", "notion", "loom", "retool", "brex", "rippling", "supabase", "replit", "clerk", "neon", "airbyte", "metabase"]
         return [b.get("token") for b in data.get("boards", []) if b.get("token")][:MAX_ATS_BOARDS]
     except Exception as exc:
         print(f"  [WARN] Greenhouse discovery: {exc}")
@@ -916,6 +943,8 @@ def source_greenhouse() -> list[dict]:
     for slug in slugs:
         try:
             data = fetch_json(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true", timeout=ATS_TIMEOUT)
+            if not isinstance(data, dict):
+                 continue
             for item in data.get("jobs", []):
                 offices = item.get("offices") or []
                 location = " ".join(str(o.get("name", "")) for o in offices if o.get("name")) or "Remote"
@@ -936,6 +965,8 @@ def source_lever() -> list[dict]:
     for slug in slugs:
         try:
             data = fetch_json(f"https://api.lever.co/v0/postings/{slug}?mode=json", timeout=ATS_TIMEOUT)
+            if not isinstance(data, list):
+                 continue
             for item in data:
                 categories = item.get("categories") or {}
                 job = make_job(item.get("text", ""), slug.title(), item.get("hostedUrl", ""), "Lever", location=categories.get("location") or "Remote", tags=["ATS"], desc=item.get("descriptionPlain", ""), posted_at=item.get("createdAt", 0))
@@ -964,7 +995,11 @@ def source_eures() -> list[dict]:
                 "keywordsEverywhere": query, "availableLanguages": "en",
             })
             data = fetch_json(url)
+            if not isinstance(data, dict):
+                 continue
             records = data.get("jvs") or data.get("jobs") or data.get("results") or data.get("data") or []
+            if not isinstance(records, list):
+                 continue
             for item in records:
                 job = make_job(
                     item.get("title") or item.get("job_title") or item.get("jobTitle") or "",
@@ -991,16 +1026,22 @@ def source_eures() -> list[dict]:
 def france_travail_token() -> str:
     if not FRANCE_TRAVAIL_CLIENT_ID or not FRANCE_TRAVAIL_CLIENT_SECRET:
         return ""
-    data = post_form(
-        "https://entreprise.francetravail.fr/connexion/oauth2/access_token?realm=%2Fpartenaire",
-        {
-            "grant_type": "client_credentials",
-            "client_id": FRANCE_TRAVAIL_CLIENT_ID,
-            "client_secret": FRANCE_TRAVAIL_CLIENT_SECRET,
-            "scope": "api_offresdemploiv2 o2dsoffre",
-        },
-    )
-    return data.get("access_token", "")
+    try:
+        data = post_form(
+            "https://entreprise.francetravail.fr/connexion/oauth2/access_token?realm=%2Fpartenaire",
+            {
+                "grant_type": "client_credentials",
+                "client_id": FRANCE_TRAVAIL_CLIENT_ID,
+                "client_secret": FRANCE_TRAVAIL_CLIENT_SECRET,
+                "scope": "api_offresdemploiv2 o2dsoffre",
+            },
+        )
+        if not isinstance(data, dict):
+            return ""
+        return data.get("access_token", "")
+    except Exception as exc:
+        print(f"  [WARN] France Travail Auth: {exc}")
+        return ""
 
 
 def source_france_travail() -> list[dict]:
@@ -1018,6 +1059,8 @@ def source_france_travail() -> list[dict]:
                 "range": f"0-{min(MAX_PER_SOURCE, 149)}",
             })
             data = fetch_json(url, headers={"Authorization": f"Bearer {token}"})
+            if not isinstance(data, dict):
+                 continue
             for item in data.get("resultats", []):
                 loc = item.get("lieuTravail") or {}
                 location = " ".join(str(loc.get(k, "")) for k in ("libelle", "commune") if loc.get(k))
@@ -1174,11 +1217,13 @@ def collect_all() -> list[dict]:
 def require_telegram() -> None:
     missing = [x for x, value in [("TG_TOKEN", TG_TOKEN), ("TG_CHAT_ID", TG_CHAT_ID)] if not value]
     if missing:
-        raise RuntimeError("Missing Telegram environment variable(s): " + ", ".join(missing))
-
+        # Don't raise error, just return False so it can be handled
+        pass
 
 def tg_send(text: str, url: str | None = None) -> bool:
-    require_telegram()
+    if not TG_TOKEN or not TG_CHAT_ID:
+        # print("  [INFO] Telegram credentials missing, skipping send.")
+        return False
     payload: dict[str, Any] = {
         "chat_id": TG_CHAT_ID,
         "text": text[:4000],
@@ -1208,7 +1253,8 @@ def format_card(job: dict, index: int, total: int) -> str:
     timestamp = job.get("posted_at") or 0
     posted = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%d %b %Y") if timestamp else "—"
     family = job.get("job_family") or get_job_family(job)
-    tags = " · ".join(str(x)[:25] for x in (job.get("tags") or [])[:4])
+    tags_list = job.get("tags") or []
+    tags = " · ".join(str(x)[:25] for x in tags_list[:4])
     lines = [
         f"[{index}/{total}] {job.get('title') or 'Untitled'}",
         f"Track    : {family}",
